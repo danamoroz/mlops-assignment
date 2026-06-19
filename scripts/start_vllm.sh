@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Start vLLM with your chosen configuration.
+# H100 production launcher — Qwen3-30B-A3B (assignment submission model).
+# Do not use on a laptop; use scripts/start_vllm_local.sh for local dev.
 # Reference: https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
 
 set -euo pipefail

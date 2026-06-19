@@ -18,15 +18,29 @@ from pydantic import BaseModel
 load_dotenv()
 
 from agent.graph import AgentState, graph  # noqa: E402
+from agent.trace_tags import (  # noqa: E402
+    annotate_trace_outcome,
+    build_invoke_config,
+)
 
-# Langfuse callback handler. If keys are set we initialize it; failures
-# are NOT swallowed - a misconfigured Langfuse should not silently
-# produce zero traces.
-_lf_handler: Any = None
-if os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY"):
-    from langfuse.langchain import CallbackHandler
+# Langfuse is enabled when keys are set; each /answer gets its own handler so
+# last_trace_id is per-request and we can tag iterations after the graph runs.
+# Set LANGFUSE_DISABLED=1 during load tests if local Langfuse can't keep up.
+_langfuse_enabled = bool(
+    os.environ.get("LANGFUSE_PUBLIC_KEY")
+    and os.environ.get("LANGFUSE_SECRET_KEY")
+    and os.environ.get("LANGFUSE_DISABLED", "").lower() not in ("1", "true", "yes")
+)
+if _langfuse_enabled:
+    from langfuse.langchain import CallbackHandler as _CallbackHandler
+else:
+    _CallbackHandler = None  # type: ignore[misc, assignment]
 
-    _lf_handler = CallbackHandler()
+
+def _langfuse_handler() -> Any | None:
+    if _CallbackHandler is None:
+        return None
+    return _CallbackHandler()
 
 
 app = FastAPI()
@@ -48,21 +62,20 @@ class AnswerResponse(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, str | bool]:
+    return {"status": "ok", "langfuse_enabled": _langfuse_enabled}
 
 
 @app.post("/answer", response_model=AnswerResponse)
 def answer(req: AnswerRequest) -> AnswerResponse:
     state = AgentState(question=req.question, db_id=req.db)
-    config: dict[str, Any] = {
-        "callbacks": [_lf_handler] if _lf_handler is not None else [],
-        "metadata": req.tags,
-    }
+    handler = _langfuse_handler()
+    config = build_invoke_config(req.tags, db_id=req.db, handler=handler)
     try:
         final = graph.invoke(state, config=config)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+        annotate_trace_outcome(handler, iterations=0, ok=False)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from e
 
     sql = final.get("sql", "")
     iteration = final.get("iteration", 0)
@@ -70,6 +83,7 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     execution = final.get("execution")
 
     if execution is None:
+        annotate_trace_outcome(handler, iterations=iteration, ok=False)
         return AnswerResponse(
             sql=sql,
             rows=None,
@@ -79,6 +93,7 @@ def answer(req: AnswerRequest) -> AnswerResponse:
             history=history,
         )
     if not execution.ok:
+        annotate_trace_outcome(handler, iterations=iteration, ok=False)
         return AnswerResponse(
             sql=sql,
             rows=None,
@@ -88,6 +103,20 @@ def answer(req: AnswerRequest) -> AnswerResponse:
             history=history,
         )
 
+    verify_ok = bool(final.get("verify_ok", False))
+    verify_issue = str(final.get("verify_issue", "") or "")
+    if not verify_ok:
+        annotate_trace_outcome(handler, iterations=iteration, ok=False)
+        return AnswerResponse(
+            sql=sql,
+            rows=[list(r) for r in (execution.rows or [])],
+            iterations=iteration,
+            ok=False,
+            error=verify_issue or "verifier rejected final result",
+            history=history,
+        )
+
+    annotate_trace_outcome(handler, iterations=iteration, ok=True)
     return AnswerResponse(
         sql=sql,
         rows=[list(r) for r in (execution.rows or [])],

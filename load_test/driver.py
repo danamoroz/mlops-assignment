@@ -32,13 +32,21 @@ async def fire_one(
     url: str,
     question: dict,
     results: list[dict],
+    tags: dict[str, str],
+    timeout_seconds: float,
 ) -> None:
-    payload = {"question": question["question"], "db": question["db_id"]}
+    payload = {
+        "question": question["question"],
+        "db": question["db_id"],
+        "tags": tags,
+    }
     t0 = time.monotonic()
     status = "ok"
     err: str | None = None
     try:
-        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+        async with session.post(
+            url, json=payload, timeout=aiohttp.ClientTimeout(total=timeout_seconds)
+        ) as resp:
             await resp.read()
             if resp.status != 200:
                 status = "http_error"
@@ -65,6 +73,8 @@ async def drive(args: argparse.Namespace) -> None:
     rnd = random.Random(0)
     results: list[dict] = []
     interval = 1.0 / args.rps
+    batch_id = args.batch_id or f"load-{int(time.time())}"
+    req_idx = 0
 
     connector = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -74,14 +84,26 @@ async def drive(args: argparse.Namespace) -> None:
         next_fire = start
         while time.monotonic() < deadline:
             q = rnd.choice(questions)
-            tasks.append(asyncio.create_task(fire_one(session, args.agent_url, q, results)))
+            req_idx += 1
+            tags = {
+                "run_type": "load_test",
+                "source": "load_driver",
+                "db_id": q["db_id"],
+                "batch_id": batch_id,
+                "seq": str(req_idx),
+            }
+            if args.config_label:
+                tags["config_label"] = args.config_label
+            tasks.append(asyncio.create_task(
+                fire_one(session, args.agent_url, q, results, tags, args.timeout)
+            ))
             next_fire += interval
             sleep_for = next_fire - time.monotonic()
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
         # let in-flight finish (cap drain at 60s)
         if tasks:
-            await asyncio.wait(tasks, timeout=60.0)
+            await asyncio.wait(tasks, timeout=float(args.drain_timeout))
         wall = time.monotonic() - start
 
     latencies = sorted(r["latency_seconds"] for r in results if r["status"] == "ok")
@@ -93,6 +115,7 @@ async def drive(args: argparse.Namespace) -> None:
         return latencies[k]
 
     summary = {
+        "batch_id": batch_id,
         "requested_rps": args.rps,
         "duration_seconds": args.duration,
         "wall_clock_seconds": wall,
@@ -119,7 +142,21 @@ def main() -> None:
     p.add_argument("--rps", type=float, default=8.0, help="target requests/second")
     p.add_argument("--duration", type=int, default=300, help="seconds to drive load")
     p.add_argument("--agent-url", default=AGENT_URL_DEFAULT)
+    p.add_argument("--batch-id", default=None, help="Langfuse batch_id tag for this run")
+    p.add_argument("--config-label", default=None, help="override config_label trace tag")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="per-request timeout seconds (use 180+ for hosted APIs)",
+    )
+    p.add_argument(
+        "--drain-timeout",
+        type=int,
+        default=60,
+        help="seconds to wait for in-flight requests after duration elapses",
+    )
     args = p.parse_args()
     asyncio.run(drive(args))
 
