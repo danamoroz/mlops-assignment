@@ -1,6 +1,6 @@
 # Assignment Report
 
-**Status:** Phase 1 complete on H100 (30B vLLM serving, probes, config documented). Remaining: submission screenshots (7 of 8) and Phase 5–6 H100 numbers — see [screenshots/CAPTURE.md](screenshots/CAPTURE.md).
+**Status:** Phases 1–5 complete on H100 (baseline eval + Grafana screenshot). Remaining: Phase 6 SLO load test + tuning numbers — see [screenshots/CAPTURE.md](screenshots/CAPTURE.md).
 
 ---
 
@@ -38,24 +38,25 @@ Execution-accuracy benchmark on 30 questions (`evals/eval_set.jsonl`). For each 
 
 Per-iteration pass rate: for iteration *k*, score the *k*-th SQL attempt in agent history (generate at k=0, first revise at k=1, etc.). If the agent stops early, later iterations carry forward the same SQL.
 
-### Results (H100 — replace before submission)
+### Results (H100 — 2026-06-19, self-hosted vLLM)
 
 | Metric | Value |
 |--------|-------|
-| `final_pass_rate` | *(fill on H100)* |
-| `pass_rate_by_iteration` | iter 0: *(H100)* / iter 1: *(H100)* / iter 2: *(H100)* |
-| `avg_agent_iterations` | *(fill on H100)* |
-| `agent_ok_rate` | *(fill on H100)* |
+| `final_pass_rate` | **43.3%** (13/30) |
+| `pass_rate_by_iteration` | iter 0: **40.0%** / iter 1: **43.3%** / iter 2: **43.3%** |
+| `avg_agent_iterations` | **1.67** |
+| `agent_ok_rate` | **76.7%** |
+| Wall clock | 45.6 s (30 questions, sequential) |
 
 Screenshot: `screenshots/grafana_eval_run.png` (dashboard reacting during `run_eval.py` on H100).
 
-### Commentary (draft from practice run — update on H100)
+### Commentary
 
-Practice baseline (Nebius API, 30B, `MAX_ITERATIONS=3`): **40%** final pass rate; per-iteration rates **flat at 40%** (iter 0 / 1 / 2). `agent_ok_rate` **77%** vs **40%** execution accuracy — verifier accepts SQL that returns wrong row sets. Iteration histogram: 20 one-round, 3 two-round, 7 three-round runs — revise fires often but rarely changes the outcome.
+H100 self-hosted baseline (`MAX_ITERATIONS=3`): **43.3%** execution accuracy with a **+3.3 pp** lift from iter 0 (40%) to iter 2 (43.3%). Iter 1 and iter 2 are identical — all improvement comes from the first revise. `agent_ok_rate` **76.7%** vs **43.3%** execution accuracy — verifier accepts SQL that returns wrong row sets on many questions. Iteration histogram: 19 one-round, 2 two-round, 9 three-round runs.
 
-**Revise success example** (`formula_1`, after tuning run): iter 0 missed `DISTINCT` on circuit coordinates; iter 1 added `SELECT DISTINCT` and passed. **Revise failure example** (`financial`, district averages): three rounds, wrong column (`A14` vs `A15`) and join shape never fixed despite verifier cycles.
+**Revise success** (`formula_1`, Australian GP coordinates): iter 0 missed `DISTINCT`; iter 1 added `SELECT DISTINCT` and matched gold rows. **Revise failure** (`financial`, district crimes): three rounds, wrong column/join never fixed despite verifier cycles.
 
-On H100 self-hosted vLLM, re-run `uv run python evals/run_eval.py --out results/eval_baseline.json` and replace this section with submission numbers only.
+The loop earns a small amount of lift on 30B but is mostly a no-op for execution accuracy — only 1/30 questions flipped wrong→correct via revise.
 
 ---
 
@@ -188,6 +189,6 @@ bash scripts/run_phase6_path_a.sh eval
 | `infra/grafana/.../serving.json` | Present |
 | `agent/graph.py`, `agent/prompts.py` | Present |
 | `evals/run_eval.py` | Present |
-| `results/eval_baseline.json` | Practice — replace on H100 |
-| `results/eval_after_tuning.json` | Practice — replace on H100 |
-| `screenshots/*.png` (×8) | Missing — capture on H100 |
+| `results/eval_baseline.json` | H100 baseline (43.3% pass rate, 2026-06-19) |
+| `results/eval_after_tuning.json` | Pending Phase 6 |
+| `screenshots/*.png` (×8) | 4/8 present — Phase 6 panels + `vllm_manual_query.png` remaining |
