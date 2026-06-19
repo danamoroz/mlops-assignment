@@ -1,6 +1,6 @@
 # Assignment Report
 
-**Status (local draft):** Code and eval/load JSON artifacts present. Eight submission screenshots and H100 30B numbers still required — see [screenshots/CAPTURE.md](screenshots/CAPTURE.md) and `scripts/run_phase7_h100.sh`.
+**Status:** Phase 1 complete on H100 (30B vLLM serving, probes, config documented). Remaining: submission screenshots (7 of 8) and Phase 5–6 H100 numbers — see [screenshots/CAPTURE.md](screenshots/CAPTURE.md).
 
 ---
 
@@ -10,20 +10,23 @@
 **Production hardware:** 1× H100 80GB  
 **Launch script:** `scripts/start_vllm.sh` (H100 only). Local dev uses `scripts/start_vllm_local.sh` with `Qwen/Qwen3-0.6B` stand-in.
 
-### Production (H100) — fill on VM session
+### Production (H100) — 2026-06-19 Nebius session
 
 | Flag | Value | One-line justification |
 |------|-------|------------------------|
 | `--model` | `Qwen/Qwen3-30B-A3B-Instruct-2507` | Fixed assignment model; MoE A3B active experts keep per-token cost manageable |
-| `--max-model-len` | *(fill on H100)* | Schema + question ≈ 1.5–3K tokens; avoid over-reserving KV for unused context |
-| `--gpu-memory-utilization` | *(fill on H100)* | Balance weight footprint vs KV headroom for concurrent agent requests |
-| `--max-num-seqs` | *(fill on H100)* | Primary concurrency knob for 10+ RPS with 2–3 LLM calls per agent request |
-| `--max-num-batched-tokens` | *(fill on H100)* | Throughput under mixed prefill (long schema) and short decode (SQL/JSON) |
-| `--enable-prefix-caching` | *(fill on H100)* | generate / verify / revise share the same schema prefix each request |
-| dtype / quantization | *(fill on H100)* | Fit 30B weights + desired concurrency on 80GB without OOM |
-| chunked prefill | *(if needed)* | TTFT spikes on long schemas before decode-bound phase |
+| `--dtype` | `bfloat16` | Native H100 dtype; BF16 weights (~57 GiB) fit with KV headroom — no quant needed |
+| `--max-model-len` | `8192` | Covers 1.5–3K schema + question with margin; longer values waste KV slots |
+| `--gpu-memory-utilization` | `0.92` | Leaves ~15 GiB KV cache after 57 GiB weights; idle GPU ~75 GiB used |
+| `--max-num-seqs` | `32` | Starting concurrency for agent's 2–3 calls/request; raise in Phase 6 toward 10+ RPS |
+| `--max-num-batched-tokens` | `8192` (default) | Matches chunked prefill cap; good for mixed long-schema prefill + short SQL decode |
+| `--enable-prefix-caching` | on | generate / verify / revise share the same schema prefix each request |
+| `--enable-chunked-prefill` | on | Reduces TTFT spikes on long schema prefills before decode-bound phase |
+| quantization | none | BF16 MoE fits 80GB; quant deferred unless Phase 6 concurrency needs more KV |
 
-Tuning order on H100: `max-num-seqs` → KV headroom → `max-model-len` → prefix caching → agent `MAX_ITERATIONS` (measure eval impact).
+**H100 startup notes (2026-06-19):** First launch downloaded ~57 GiB weights; model load 164 s, 56.9 GiB VRAM for weights, **15.2 GiB available KV cache**. vLLM 0.10.2 V1 engine + FlashAttention. Prometheus `vllm` target UP. Five manual probes via `scripts/probe_vllm_sql.sh` returned plausible SQL in ~3 s total.
+
+Tuning order for Phase 6: `max-num-seqs` → KV headroom → `max-model-len` → prefix caching → agent `MAX_ITERATIONS` (measure eval impact).
 
 ---
 

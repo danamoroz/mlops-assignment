@@ -1,0 +1,34 @@
+Model: Qwen/Qwen3-30B-A3B-Instruct-2507
+Base URL: http://localhost:8000
+
+=== db: superhero ===
+Q: How many superheroes have the super power of "Super Strength"?
+SELECT COUNT(*) FROM superheroes WHERE power = 'Super Strength';
+
+=== db: financial ===
+Q: How many male clients in 'Hl.m. Praha' district?
+SELECT COUNT(*) 
+FROM clients 
+WHERE gender = 'male' AND district = 'Hl.m. Praha';
+
+=== db: formula_1 ===
+Q: What is the coordinates location of the circuits for Australian grand prix?
+SELECT location, latitude, longitude
+FROM circuits
+WHERE country = 'Australia';
+
+=== db: california_schools ===
+Q: List the top five schools, by descending order, from the highest to the lowest, the most number of Enrollment (Ages 5-17). Please give their NCES school identification number.
+SELECT nces_school_id
+FROM california_schools
+ORDER BY enrollment_ages_5_to_17 DESC
+LIMIT 5;
+
+=== db: codebase_community ===
+Q: How many users received commentator badges in 2014?
+SELECT COUNT(*) 
+FROM users u
+JOIN badges b ON u.user_id = b.user_id
+WHERE b.badge_name = 'Commentator' 
+  AND b.date_earned BETWEEN '2014-01-01' AND '2014-12-31';
+
