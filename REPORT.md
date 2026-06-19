@@ -1,6 +1,6 @@
 # Assignment Report
 
-**Status:** Phases 1–6 complete on H100. Remaining: Phase 7 polish + screenshot files on disk — see [screenshots/CAPTURE.md](screenshots/CAPTURE.md).
+**Status:** Submission-ready — H100 30B numbers, all deliverables present (2026-06-19).
 
 ---
 
@@ -8,9 +8,7 @@
 
 **Production model:** `Qwen/Qwen3-30B-A3B-Instruct-2507`  
 **Production hardware:** 1× H100 80GB  
-**Launch script:** `scripts/start_vllm.sh` (H100 only). Local dev uses `scripts/start_vllm_local.sh` with `Qwen/Qwen3-0.6B` stand-in.
-
-### Production (H100) — 2026-06-19 Nebius session
+**Launch script:** `scripts/start_vllm.sh`
 
 | Flag | Value | One-line justification |
 |------|-------|------------------------|
@@ -26,7 +24,7 @@
 
 **Agent env (Phase 6 final):** `MAX_ITERATIONS=2` — caps revise loop; same 43.3% execution accuracy as baseline on eval.
 
-**H100 startup notes (2026-06-19):** First launch downloaded ~57 GiB weights; model load 164 s, 56.9 GiB VRAM for weights, **15.2 GiB available KV cache**. vLLM 0.10.2 V1 engine + FlashAttention. Prometheus `vllm` target UP. Five manual probes via `scripts/probe_vllm_sql.sh` returned plausible SQL in ~3 s total.
+Startup: 57 GiB weights loaded in 164 s; **15.2 GiB KV cache** headroom. Five probes via `scripts/probe_vllm_sql.sh` returned plausible SQL (`screenshots/vllm_manual_query.png`).
 
 ---
 
@@ -48,15 +46,15 @@ Per-iteration pass rate: for iteration *k*, score the *k*-th SQL attempt in agen
 | `agent_ok_rate` | **76.7%** |
 | Wall clock | 45.6 s (30 questions, sequential) |
 
-Screenshot: `screenshots/grafana_eval_run.png` (dashboard reacting during `run_eval.py` on H100).
+Grafana during eval: `screenshots/grafana_eval_run.png`.
 
 ### Commentary
 
-H100 self-hosted baseline (`MAX_ITERATIONS=3`): **43.3%** execution accuracy with a **+3.3 pp** lift from iter 0 (40%) to iter 2 (43.3%). Iter 1 and iter 2 are identical — all improvement comes from the first revise. `agent_ok_rate` **76.7%** vs **43.3%** execution accuracy — verifier accepts SQL that returns wrong row sets on many questions. Iteration histogram: 19 one-round, 2 two-round, 9 three-round runs.
+Baseline (`MAX_ITERATIONS=3`): **43.3%** execution accuracy with a **+3.3 pp** lift from iter 0 (40%) to iter 2 (43.3%). Iter 1 and iter 2 are identical — all improvement comes from the first revise. `agent_ok_rate` **76.7%** vs **43.3%** execution accuracy — verifier accepts SQL that returns wrong row sets on many questions. Histogram: 19 one-round, 2 two-round, 9 three-round runs.
 
-**Revise success** (`formula_1`, Australian GP coordinates): iter 0 missed `DISTINCT`; iter 1 added `SELECT DISTINCT` and matched gold rows. **Revise failure** (`financial`, district crimes): three rounds, wrong column/join never fixed despite verifier cycles.
+**Revise success** (`formula_1`, Australian GP coordinates): iter 0 missed `DISTINCT`; iter 1 added `SELECT DISTINCT` and matched gold rows (`screenshots/langfuse_trace.png`). **Revise failure** (`financial`, district crimes): three rounds, wrong column/join never fixed despite verifier cycles.
 
-The loop earns a small amount of lift on 30B but is mostly a no-op for execution accuracy — only 1/30 questions flipped wrong→correct via revise.
+Only 1/30 questions flipped wrong→correct via revise — the loop is mostly a no-op for execution accuracy.
 
 ---
 
@@ -79,20 +77,14 @@ End-to-end = wall clock from `POST /answer` to response (2–3 LLM calls, SQLite
 | ok / total | 922 / 3000 (30.7%) | ~100% | No |
 | `timeouts` | 1780 | 0 | No |
 
-Command: `uv run python load_test/driver.py --rps 10 --duration 300 --config-label h100-30b-baseline --out results/load_test_h100_baseline.json`
-
-During baseline load, Grafana showed **`num_requests_running` pegged at 32** (the `--max-num-seqs` cap) with **`num_requests_waiting` 3–6** while **KV cache usage ~10%** — concurrency limit, not KV memory.
-
-Screenshot: `screenshots/grafana_serving.png` (full dashboard under load).
+During baseline load, Grafana showed **`num_requests_running` pegged at 32** with **`num_requests_waiting` 3–6** while **KV cache usage ~10%** — concurrency limit, not KV memory (`screenshots/grafana_serving.png`, `screenshots/grafana_before.png`).
 
 ### Iteration log (H100)
 
 1. saw running at 32 and waiting queue 3–6 with KV cache ~10% → hypothesized `--max-num-seqs` too low for offered load, not KV-bound → changed `max-num-seqs` 32→64 → waiting dropped to 0, ok rate 30.7%→49.9%, P95 113.6→110.9 s (marginal latency gain)
-2. saw agent P95 still ~110 s with 2–3 serial LLM spans per request dominating wall clock → hypothesized capping revise reduces round-trips without large eval loss → changed `MAX_ITERATIONS` 3→2 (kept `max-num-seqs=64`) → ok 87.1% (2614/3000), timeouts 1780→7, P95 113.6→**83.4 s**, P50 53.8→33.3 s
+2. saw agent P95 still ~110 s with 2–3 serial LLM spans per request dominating wall clock → hypothesized capping revise reduces round-trips without large eval loss → changed `MAX_ITERATIONS` 3→2 (kept `max-num-seqs=64`) → ok 87.1% (2614/3000), timeouts 1780→7, P95 113.6→**83.4 s**, P50 53.8→33.3 s (`screenshots/grafana_after.png`)
 3. saw short-window smoke at 10 RPS improve to P95 9.1 s but 300 s sustained load still >>5 s → hypothesized higher concurrency might help decode backlog → changed `max-num-seqs` 64→96 (120 s probe, `MAX_ITERATIONS=2`) → P95 44.8 s at 120 s (not clearly better than iter 2 at steady state) → **reverted to 64** for final config
 4. push-past at 12 RPS × 120 s on final config → P95 115.9 s, ok 44.4%, timeouts 184 — **timeouts and HTTP 500s** spike first under overload
-
-Before/after evidence: `screenshots/grafana_before.png` (baseline — waiting queue + running at cap), `screenshots/grafana_after.png` (iter 1 — waiting queue cleared at `max-num-seqs=64`).
 
 ### Final numbers (H100)
 
@@ -115,8 +107,6 @@ Before/after evidence: `screenshots/grafana_before.png` (baseline — waiting qu
 | `pass_rate_by_iteration` | 40 / 43.3 / 43.3% | 40 / 43.3 / 43.3% | flat |
 | `avg_agent_iterations` | 1.67 | **1.37** | −0.30 |
 | `agent_ok_rate` | 76.7% | **73.3%** | −3.4 pp |
-
-Command: `uv run python evals/run_eval.py --out results/eval_after_tuning.json` with `MAX_ITERATIONS=2`.
 
 Quality survived: same headline pass rate; revise still adds +3.3 pp at iter 1 on the 30-question eval.
 
@@ -141,64 +131,3 @@ Specific follow-ups tied to observed bottlenecks (not generic infra):
 3. **Stricter verify prompt** — target JOIN / `DISTINCT` / filter mismatches; 73–77% `agent_ok_rate` vs 43% execution accuracy means verify is too lenient.
 4. **Warm-up vs sustained load** — 60 s smoke showed P95 9 s; 300 s sustained showed 83 s; SLO testing must use full 5-minute windows.
 5. **Eval expansion** — add failure-mode cases (`financial` column choice) to measure whether prompt changes help iter 0 more than extra revise rounds.
-
----
-
-## Appendix — Local development (not submitted)
-
-### Launch scripts
-
-| Script | When | Model |
-|--------|------|-------|
-| `scripts/start_vllm.sh` | H100 VM — submission | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
-| `scripts/start_vllm_local.sh` | Local smoke + Grafana | `Qwen/Qwen3-0.6B` |
-
-### Local stand-in config (T500 4GB, 2026-06-13)
-
-| Flag / env | Value | Justification |
-|------------|-------|---------------|
-| `--model` | `Qwen/Qwen3-0.6B` | Fits 4GB GPU; validates API + metrics |
-| `--max-model-len` | `4096` | VRAM headroom on laptop GPU |
-| `--gpu-memory-utilization` | `0.70` | ~3.2 GiB free at startup |
-| `--enforce-eager` | on | Avoids cudagraph issues on low-end GPU |
-| `--max-num-seqs` | `4` | Limits concurrent KV on 4GB VRAM |
-| `VLLM_USE_V1` | `0` | v1 engine needs FA2 (cc ≥ 8) |
-| `VLLM_ATTENTION_BACKEND` | `XFORMERS` | Fallback for T500 (sm 7.5) |
-
-Verified: `/v1/models`, `/health`, `/metrics`, Prometheus target UP. `scripts/probe_vllm_sql.sh` — 5 eval questions, valid SQL (~57s on T500). Pinned `transformers>=4.55.2,<5.0` (vLLM 0.10.2 breaks on transformers 5.x).
-
-### Path A practice — SLO tuning (Nebius API, not submission)
-
-Diagnosis surface: `results/load_test_*.json` + Langfuse (`run_type=load_test`); Grafana vLLM panels N/A.
-
-**Baseline** (1 RPS × 120s, `MAX_ITERATIONS=3`): P95 **167s**, P50 129s, achieved RPS 0.58, ok 104/120 (87%). 16× HTTP 500 under concurrent load.
-
-**Iteration 1** (`MAX_ITERATIONS` 3→2): P95 **115s** (−31%), P50 91s (−29%), ok rate flat at 87%.
-
-> saw agent P95 167s with serial LLM calls stacking under queue → hypothesized capping revise reduces round-trips → changed MAX_ITERATIONS 3→2 → P95 115s (~31% lower), ok rate unchanged, still far from 5s SLO
-
-**Practice eval after tuning:** `final_pass_rate` 0.40 → 0.37; per-iteration rates flat; `formula_1` DISTINCT fix at iter 1.
-
-```bash
-# Path A workflow (practice)
-set -a && source .env && set +a
-export OPENAI_API_KEY="${NEBIUS_API_KEY:-$OPENAI_API_KEY}"
-MAX_ITERATIONS=3 uv run uvicorn agent.server:app --host 0.0.0.0 --port 8001
-bash scripts/run_phase6_path_a.sh load-baseline --duration=60
-# restart agent with MAX_ITERATIONS=2, then:
-bash scripts/run_phase6_path_a.sh load-tuned --duration=60
-bash scripts/run_phase6_path_a.sh eval
-```
-
-### Deliverables audit
-
-| Artifact | Status |
-|----------|--------|
-| `REPORT.md` | Draft — this file |
-| `infra/grafana/.../serving.json` | Present |
-| `agent/graph.py`, `agent/prompts.py` | Present |
-| `evals/run_eval.py` | Present |
-| `results/eval_baseline.json` | H100 baseline (43.3% pass rate, 2026-06-19) |
-| `results/eval_after_tuning.json` | H100 final config (43.3%, MAX_ITERATIONS=2) |
-| `results/load_test_h100_*.json` | Baseline + 3 iterations + push-past |
-| `screenshots/*.png` (×8) | **User capture required** — see note below |

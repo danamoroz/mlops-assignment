@@ -1,5 +1,7 @@
 # Screenshot capture checklist (H100 submission)
 
+**Status:** All eight PNGs captured on H100 (2026-06-19). See `REPORT.md` for references.
+
 All eight PNGs must come from **H100 + Qwen3-30B-A3B** runs ([assignment_remarks.md](../_notes/assignment_remarks.md)).
 
 | File | When | What to show |
