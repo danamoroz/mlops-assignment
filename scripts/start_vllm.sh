@@ -24,7 +24,7 @@ ARGS=(
   --dtype bfloat16
   --max-model-len 8192
   --gpu-memory-utilization 0.92
-  --max-num-seqs 32
+  --max-num-seqs 64
   --enable-prefix-caching
   --enable-chunked-prefill
 )

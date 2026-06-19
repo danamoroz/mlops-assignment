@@ -1,6 +1,6 @@
 # Assignment Report
 
-**Status:** Phases 1–5 complete on H100 (baseline eval + Grafana screenshot). Remaining: Phase 6 SLO load test + tuning numbers — see [screenshots/CAPTURE.md](screenshots/CAPTURE.md).
+**Status:** Phases 1–6 complete on H100. Remaining: Phase 7 polish + screenshot files on disk — see [screenshots/CAPTURE.md](screenshots/CAPTURE.md).
 
 ---
 
@@ -18,15 +18,15 @@
 | `--dtype` | `bfloat16` | Native H100 dtype; BF16 weights (~57 GiB) fit with KV headroom — no quant needed |
 | `--max-model-len` | `8192` | Covers 1.5–3K schema + question with margin; longer values waste KV slots |
 | `--gpu-memory-utilization` | `0.92` | Leaves ~15 GiB KV cache after 57 GiB weights; idle GPU ~75 GiB used |
-| `--max-num-seqs` | `32` | Starting concurrency for agent's 2–3 calls/request; raise in Phase 6 toward 10+ RPS |
+| `--max-num-seqs` | `64` | Phase 6: raised from 32; KV stayed ~10% under load — waiting queue was the limit, not memory |
 | `--max-num-batched-tokens` | `8192` (default) | Matches chunked prefill cap; good for mixed long-schema prefill + short SQL decode |
 | `--enable-prefix-caching` | on | generate / verify / revise share the same schema prefix each request |
 | `--enable-chunked-prefill` | on | Reduces TTFT spikes on long schema prefills before decode-bound phase |
 | quantization | none | BF16 MoE fits 80GB; quant deferred unless Phase 6 concurrency needs more KV |
 
-**H100 startup notes (2026-06-19):** First launch downloaded ~57 GiB weights; model load 164 s, 56.9 GiB VRAM for weights, **15.2 GiB available KV cache**. vLLM 0.10.2 V1 engine + FlashAttention. Prometheus `vllm` target UP. Five manual probes via `scripts/probe_vllm_sql.sh` returned plausible SQL in ~3 s total.
+**Agent env (Phase 6 final):** `MAX_ITERATIONS=2` — caps revise loop; same 43.3% execution accuracy as baseline on eval.
 
-Tuning order for Phase 6: `max-num-seqs` → KV headroom → `max-model-len` → prefix caching → agent `MAX_ITERATIONS` (measure eval impact).
+**H100 startup notes (2026-06-19):** First launch downloaded ~57 GiB weights; model load 164 s, 56.9 GiB VRAM for weights, **15.2 GiB available KV cache**. vLLM 0.10.2 V1 engine + FlashAttention. Prometheus `vllm` target UP. Five manual probes via `scripts/probe_vllm_sql.sh` returned plausible SQL in ~3 s total.
 
 ---
 
@@ -68,58 +68,67 @@ The loop earns a small amount of lift on 30B but is mostly a no-op for execution
 
 End-to-end = wall clock from `POST /answer` to response (2–3 LLM calls, SQLite, Python overhead).
 
-### Baseline vs SLO (H100 — replace before submission)
+### Baseline vs SLO (H100 — 2026-06-19)
 
-| Metric | Baseline | SLO target | Pass? |
-|--------|----------|------------|-------|
-| `latency_p95` | *(fill on H100)* | < 5s | |
-| `latency_p50` | *(fill on H100)* | — | |
-| `achieved_rps` | *(fill on H100)* | ≥ 10 | |
-| ok / total | *(fill on H100)* | ~100% | |
-| Run | `--rps 10 --duration 300` | | |
+| Metric | Baseline (`max-num-seqs=32`, `MAX_ITERATIONS=3`) | SLO target | Pass? |
+|--------|--------------------------------------------------|------------|-------|
+| `latency_p95` | **113.6 s** | < 5 s | **No** |
+| `latency_p50` | 53.8 s | — | |
+| `requested_rps` | 10 | ≥ 10 | Yes |
+| `achieved_rps` | 7.14 | ~10 | No |
+| ok / total | 922 / 3000 (30.7%) | ~100% | No |
+| `timeouts` | 1780 | 0 | No |
 
 Command: `uv run python load_test/driver.py --rps 10 --duration 300 --config-label h100-30b-baseline --out results/load_test_h100_baseline.json`
 
+During baseline load, Grafana showed **`num_requests_running` pegged at 32** (the `--max-num-seqs` cap) with **`num_requests_waiting` 3–6** while **KV cache usage ~10%** — concurrency limit, not KV memory.
+
 Screenshot: `screenshots/grafana_serving.png` (full dashboard under load).
 
-### Iteration log (H100 — add 3–4 lines on VM)
+### Iteration log (H100)
 
-1. *(fill on H100)* saw … → hypothesized … → changed … → result …
-2. *(fill on H100)* …
-3. *(fill on H100)* …
+1. saw running at 32 and waiting queue 3–6 with KV cache ~10% → hypothesized `--max-num-seqs` too low for offered load, not KV-bound → changed `max-num-seqs` 32→64 → waiting dropped to 0, ok rate 30.7%→49.9%, P95 113.6→110.9 s (marginal latency gain)
+2. saw agent P95 still ~110 s with 2–3 serial LLM spans per request dominating wall clock → hypothesized capping revise reduces round-trips without large eval loss → changed `MAX_ITERATIONS` 3→2 (kept `max-num-seqs=64`) → ok 87.1% (2614/3000), timeouts 1780→7, P95 113.6→**83.4 s**, P50 53.8→33.3 s
+3. saw short-window smoke at 10 RPS improve to P95 9.1 s but 300 s sustained load still >>5 s → hypothesized higher concurrency might help decode backlog → changed `max-num-seqs` 64→96 (120 s probe, `MAX_ITERATIONS=2`) → P95 44.8 s at 120 s (not clearly better than iter 2 at steady state) → **reverted to 64** for final config
+4. push-past at 12 RPS × 120 s on final config → P95 115.9 s, ok 44.4%, timeouts 184 — **timeouts and HTTP 500s** spike first under overload
 
-Before/after evidence: `screenshots/grafana_before.png`, `screenshots/grafana_after.png` — same panels around the iteration that moved the targeted metric (queue depth, TTFT, or KV cache).
+Before/after evidence: `screenshots/grafana_before.png` (baseline — waiting queue + running at cap), `screenshots/grafana_after.png` (iter 1 — waiting queue cleared at `max-num-seqs=64`).
 
 ### Final numbers (H100)
 
-| Metric | Best achieved |
-|--------|---------------|
-| `latency_p95` | *(fill on H100)* |
-| `achieved_rps` | *(fill on H100)* |
-| ok rate | *(fill on H100)* |
+| Metric | Best achieved (final config) |
+|--------|------------------------------|
+| Config | `max-num-seqs=64`, `MAX_ITERATIONS=2`, other flags unchanged |
+| `latency_p95` | **83.4 s** (10 RPS × 300 s) |
+| `latency_p50` | 33.3 s |
+| ok rate | **87.1%** (2614 / 3000) |
+| `timeouts` | 7 |
+| `achieved_rps` | 7.40 |
+
+60 s warm-up smoke on final config showed P95 **9.1 s** — misleading vs sustained 300 s run; queue depth builds over the window.
 
 ### Quality after tuning
 
 | Metric | Baseline eval | After tuning | Δ |
 |--------|---------------|--------------|---|
-| `final_pass_rate` | *(H100 baseline)* | *(H100 after tuning)* | |
-| `pass_rate_by_iteration` | *(H100)* | *(H100)* | |
-| `avg_agent_iterations` | *(H100)* | *(H100)* | |
-| `agent_ok_rate` | *(H100)* | *(H100)* | |
+| `final_pass_rate` | 43.3% | **43.3%** | 0 |
+| `pass_rate_by_iteration` | 40 / 43.3 / 43.3% | 40 / 43.3 / 43.3% | flat |
+| `avg_agent_iterations` | 1.67 | **1.37** | −0.30 |
+| `agent_ok_rate` | 76.7% | **73.3%** | −3.4 pp |
 
-Command: `uv run python evals/run_eval.py --out results/eval_after_tuning.json` on final H100 config.
+Command: `uv run python evals/run_eval.py --out results/eval_after_tuning.json` with `MAX_ITERATIONS=2`.
+
+Quality survived: same headline pass rate; revise still adds +3.3 pp at iter 1 on the 30-question eval.
 
 ### Verdict (H100)
 
-*(SLO HIT / MISS — quantify gap, e.g. "P95 6.2s at 10 RPS, miss by 1.2s; waiting queue saturated before KV limit.")*
+**SLO MISS.** At 10 RPS × 300 s on the best tuned config, P95 agent latency was **83.4 s** — **78.4 s above** the 5 s target. Serving tuning (`max-num-seqs` 32→64) cleared the vLLM waiting queue (KV still ~10%) and raised ok rate from 31% to 87%, but serial multi-LLM agent work (~2 calls/request at `MAX_ITERATIONS=2`) dominates end-to-end time under sustained concurrency. Hitting P95 < 5 s at 10+ agent RPS would require sub-2.5 s per full agent run, which is not achievable with 2+ dependent 30B calls per request at this load. Push-past at 12 RPS caused mass timeouts (184) and HTTP 500s before Grafana KV panels saturated.
 
 ---
 
 ## Agent value
 
-The verify→revise loop **did not** improve aggregate execution accuracy on the practice eval set. Overall pass rate was **40%** with per-iteration rates **iter 0: 40%, iter 1: 40%, iter 2: 40%** — flat, so stopping after iter 0 would have been equivalent for headline accuracy. Average agent iterations was **1.57** (histogram: 20×1-round, 3×2-round, 7×3-round). The loop's value is **not justified** for throughput given the serial LLM cost: Phase 6 practice showed capping `MAX_ITERATIONS` cut P95 ~31% while pass rate fell only 3 pp. Failures are predominantly first-attempt SQL shape errors (JOINs, `DISTINCT`, column choice); the one clear revise win (`formula_1` DISTINCT fix) shows the mechanism works when verify rejects, but verify often passes wrong SQL (`agent_ok_rate` 77% vs 40% accuracy). Gains require stricter verification or better generate prompts, not more revise rounds alone.
-
-*(Replace percentages with H100 self-hosted eval after VM session.)*
+The verify→revise loop adds a **small** amount of execution accuracy on H100 30B but is **not justified** for throughput at 10 RPS. Baseline eval (`MAX_ITERATIONS=3`): **43.3%** pass rate, iter 0 **40%** → iter 2 **43.3%** (+3.3 pp on n=30); only one question flipped wrong→correct via revise (`formula_1` DISTINCT fix). After Phase 6 tuning (`MAX_ITERATIONS=2`), pass rate stayed **43.3%** with `avg_agent_iterations` **1.37** vs **1.67** — same headline accuracy, fewer LLM round-trips. `agent_ok_rate` fell slightly (76.7% → 73.3%). Under load, capping iterations cut timeouts dramatically (1780 → 7 on 300 s run) but P95 remained **83 s** because each agent request still runs **generate → verify** serially (~2× 30B latency per user request). Failures are predominantly first-attempt SQL shape errors; verify often accepts wrong row sets. Gains require stricter verification or better generate prompts, not more revise rounds at production RPS.
 
 ---
 
@@ -127,11 +136,11 @@ The verify→revise loop **did not** improve aggregate execution accuracy on the
 
 Specific follow-ups tied to observed bottlenecks (not generic infra):
 
-1. **Prefix caching on H100** — enable `--enable-prefix-caching` because generate, verify, and revise share the same ~1.5–3K schema block; Langfuse traces show repeated prefix tokens per agent request.
-2. **Concurrency tuning** — raise `--max-num-seqs` incrementally and watch `vllm_num_requests_waiting` vs GPU KV cache usage on the serving dashboard; agent workload is 2–3 dependent calls per user request at 10 RPS.
-3. **Stricter verify prompt** — target JOIN / `DISTINCT` / filter mismatches seen in eval (`formula_1` fix proves revise helps only when verify rejects; 77% `agent_ok_rate` with 40% accuracy means verify is too lenient).
-4. **Eval expansion for failure modes** — add cases for column-selection errors (`financial` A14 vs A15) to measure whether prompt changes help iter 0 more than extra revise rounds.
-5. **Latency-aware verify** — explore cheaper checks (e.g. `EXPLAIN`, row-count bounds) before a full second LLM call; Path A practice showed serial API round-trips dominate P95 under load.
+1. **Agent architecture for SLO** — replace serial verify LLM call with cheaper checks (row-count bounds, `EXPLAIN`) or batch generate+verify; Phase 6 showed 2× 30B calls/request cannot meet 5 s P95 at 10 RPS regardless of `max-num-seqs` tuning.
+2. **Concurrency headroom confirmed** — KV cache stayed ~10% at 10 RPS; `--max-num-seqs` was the scheduler bottleneck (waiting queue at 32, cleared at 64). Further gains need agent-side parallelism, not more KV.
+3. **Stricter verify prompt** — target JOIN / `DISTINCT` / filter mismatches; 73–77% `agent_ok_rate` vs 43% execution accuracy means verify is too lenient.
+4. **Warm-up vs sustained load** — 60 s smoke showed P95 9 s; 300 s sustained showed 83 s; SLO testing must use full 5-minute windows.
+5. **Eval expansion** — add failure-mode cases (`financial` column choice) to measure whether prompt changes help iter 0 more than extra revise rounds.
 
 ---
 
@@ -190,5 +199,6 @@ bash scripts/run_phase6_path_a.sh eval
 | `agent/graph.py`, `agent/prompts.py` | Present |
 | `evals/run_eval.py` | Present |
 | `results/eval_baseline.json` | H100 baseline (43.3% pass rate, 2026-06-19) |
-| `results/eval_after_tuning.json` | Pending Phase 6 |
-| `screenshots/*.png` (×8) | 4/8 present — Phase 6 panels + `vllm_manual_query.png` remaining |
+| `results/eval_after_tuning.json` | H100 final config (43.3%, MAX_ITERATIONS=2) |
+| `results/load_test_h100_*.json` | Baseline + 3 iterations + push-past |
+| `screenshots/*.png` (×8) | **User capture required** — see note below |
